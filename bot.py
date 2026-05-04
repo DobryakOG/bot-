@@ -3,14 +3,18 @@ from discord.ext import commands
 from discord import app_commands
 from discord.ui import Button, View, Modal, TextInput, Select
 import os
-from dotenv import load_dotenv
 from datetime import datetime, timedelta
 import json
 import asyncio
 import re
 
 # Загружаем переменные окружения
-load_dotenv()
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    print('⚠️ python-dotenv не установлен, используем системные переменные окружения')
+    pass
 
 TOKEN = os.getenv('DISCORD_TOKEN')
 FAMILY_NAME = os.getenv('FAMILY_NAME', 'GLORY')
